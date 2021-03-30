@@ -15,6 +15,16 @@ clean_genesys2: ## Removes all bitstreams, *.log files and vivado related files 
 	rm -f pulpissimo_genesys2.bit
 	rm -f pulpissimo_genesys2.bin
 
+arty-a7: ## Generates the bistream for the arty-a7-100t board
+	$(MAKE) -C pulpissimo-arty-a7 all
+	cp pulpissimo-arty-a7/pulpissimo-arty-a7-100t.runs/impl_1/xilinx_pulpissimo.bit pulpissimo_arty-a7-100t.bit
+	cp pulpissimo-arty-a7/pulpissimo-arty-a7-100t.runs/impl_1/xilinx_pulpissimo.bin pulpissimo_arty-a7-100t.bin
+	@echo "Bitstream generation for genesys2 board finished. The bitstream Configuration Memory File was copied to ./pulpissimo_arty-a7-100t.bit and ./pulpissimo_arty-a7-100t.bin"
+
+clean_arty-a7-100t: ## Removes all bitstreams, *.log files and vivado related files (rm -rf vivado*) for the genesys2 board.
+	$(MAKE) -C pulpissimo-arty-a7-100t clean
+	rm -f pulpissimo_arty-a7-100t.bit
+	rm -f pulpissimo_arty-a7-100t.bin
 zcu104: ## Generates the bistream for the zcu104 board
 	$(MAKE) -C pulpissimo-zcu104 all
 	cp pulpissimo-zcu104/pulpissimo-zcu104.runs/impl_1/xilinx_pulpissimo.bit pulpissimo_zcu104.bit
