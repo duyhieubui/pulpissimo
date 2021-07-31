@@ -6,11 +6,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.0.0] - 2021-06-26
+
+### Added
+- Fast virtual boot mode to accelerate simulation of software on RTL platform
+- Added support for Bender as dependency management tool
+- Support for ZSH for the VSIM setup script (`setup/vsim.sh`)
+- Added new HyperFlash peripheral
+- Added additional bootmode signal to accomodate for new Hyperflash boot
+
+
+### Changed
+- HWPE MAC unit is disabled by default
+- The latest version of IPApprox with semver support is now used
+- Bump `pulp_soc` to `v3.0.0` and updated bootcode to add support for the newest
+  PULPissimo compatible version of ibex with a new OBI to TCDM protocol adapter.
+- Various smaller clean-ups and improvements of the Makefiles and simulation TCL scripts
+- The FPGA ports no longer generate the memories out-of-context. 
+  Thus, chaning the memory size in RTL now also affects the FPGA memory size.
+- Switched to new I2C peripheral version with command stream interface
+
+### Fixed
+- Resolved incompatibility with Vivao 2020.2
+- Resolved incompatibility with Genus 2019.10
+  (Genus support still requires to remove some SV attributes from the source code due to some issues in Genus' parser)
+  Executing `find . -type f -name '*.sv' -exec sed -i -e 's/(\* async \*)//g' {} \;` 
+  in the project root after checking out the sub-ips should do the trick.
+- Added better handshaking behavior of mockup FLL modules in FPGA port to avoid
+  deadlocks when trying to interact with the FLL in the FPGA port.
+- With `pulp_soc` `v3.0.0` a serious bug in the interleaved SRAM address line
+  connection is fixed which caused part of the memory to be inaccessible.
+- Remove timing constraints on unmapped signals for FPGA ports
+- Reduced latency of APB and AXI transactions
+
+### Removed
+- Removed support for Xilinx Zedboard. With the latest feature additions, the
+  Zedboard is no longer large enough to fit the pulpissimo design. The necessary
+  scripts to synthesize pulpissimo for the Zedboard will remain in the `fpga`
+  directory but the bitstream generation flow will fail due to insuffienct LUTs available.
+
 ## [6.0.0] - 2020-12-11
 
 ### Changed
-- Bump `pulp_soc` to `v2.0.0` which adds completely new interconnect with integrated AXI crossbar for simplified IP
-  integration
+- Bump `pulp_soc` to `v2.0.0` which adds completely new interconnect with
+  integrated AXI crossbar for simplified IP integration
 - Make number of SPI and I2C peripherals parametrizable
 - Various FPGA tcl script enhancements
 - Various rtl code cleanups and assertion additions

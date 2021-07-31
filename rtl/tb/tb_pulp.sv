@@ -48,6 +48,10 @@ module tb_pulp;
    // how L2 is loaded. valid values are "JTAG" or "STANDALONE", the latter works only when USE_S25FS256S_MODEL is 1
    parameter  LOAD_L2 = "JTAG";
 
+   // STIM_FROM sets where is the image data.
+   // In case any values are not given, the debug module takes over the boot process.
+   parameter  STIM_FROM = "JTAG"; // can be "JTAG" "SPI_FLASH", "HYPER_FLASH", or ""
+
    // enable DPI-based JTAG
    parameter  ENABLE_DPI = 0;
 
@@ -211,8 +215,8 @@ module tb_pulp;
    wire w_master_i2s_sck;
    wire w_master_i2s_ws ;
 
-   wire w_bootsel;
-   logic s_bootsel;
+   wire [1:0] w_bootsel;
+   logic [1:0] s_bootsel;
 
 
    logic [8:0] jtag_conf_reg, jtag_conf_rego; //22bits but actually only the last 9bits are used
@@ -356,7 +360,7 @@ module tb_pulp;
       assign w_uart_tx = w_uart_rx;
    end
 
-   // TODO: this should be set depending on the desired boot mode (JTAG, FLASH)
+
    assign w_bootsel = s_bootsel;
 
    /* JTAG DPI-based verification IP */
@@ -381,8 +385,8 @@ module tb_pulp;
       if(USE_S25FS256S_MODEL == 1) begin
          s25fs256s #(
             .TimingModel   ( "S25FS256SAGMFI000_F_30pF" ),
-            .mem_file_name ( "slm_files/flash_stim.slm" ),
-            .UserPreload   (1)
+            .mem_file_name ( "./vectors/qspi_stim.slm" ),
+            .UserPreload   ( ( LOAD_L2 == "STANDALONE" ) ? 1 : 0 )
          ) i_spi_flash_csn0 (
             .SI       ( w_spi_master_sdio0 ),
             .SO       ( w_spi_master_sdio1 ),
@@ -578,7 +582,8 @@ module tb_pulp;
       .pad_i2s1_sdi       ( w_i2s1_sdi         ),
 
       .pad_reset_n        ( w_rst_n            ),
-      .pad_bootsel        ( w_bootsel          ),
+      .pad_bootsel0        ( w_bootsel[0]      ),
+      .pad_bootsel1        ( w_bootsel[1]      ),
 
       .pad_jtag_tck       ( w_tck              ),
       .pad_jtag_tdi       ( w_tdi              ),
@@ -604,6 +609,7 @@ module tb_pulp;
          logic [6:0]  dm_addr;
          logic        error;
          int         num_err;
+         int         rd_cnt;
          automatic logic [9:0]  FC_CORE_ID = {5'd31, 5'd0};
 
          int entry_point;
@@ -611,6 +617,7 @@ module tb_pulp;
 
          error   = 1'b0;
          num_err = 0;
+         rd_cnt = 0;
 
          // read entry point from commandline
          if ($value$plusargs("ENTRY_POINT=%h", entry_point))
@@ -628,7 +635,7 @@ module tb_pulp;
 
          if (ENABLE_OPENOCD == 1) begin
             // Use openocd to interact with the simulation
-            s_bootsel = 1'b1;
+            s_bootsel = 2'b01;
             $display("[TB] %t - Releasing hard reset", $realtime);
             s_rst_n = 1'b1;
 
@@ -641,13 +648,35 @@ module tb_pulp;
             // Use only the testbench to do the loading and running
 
             // determine if we want to load the binary with jtag or from flash
-            if (LOAD_L2 == "STANDALONE")
-               s_bootsel = 1'b0;
-            else if (LOAD_L2 == "JTAG") begin
-               s_bootsel = 1'b1;
+            if (LOAD_L2 == "STANDALONE") begin
+               // jtag reset needed anyway
+               jtag_pkg::jtag_reset(s_tck, s_tms, s_trstn, s_tdi);
+               jtag_pkg::jtag_softreset(s_tck, s_tms, s_trstn, s_tdi);
+               #5us;
+
+               if (STIM_FROM == "HYPER_FLASH") begin
+                  $display("[TB] %t - HyperFlash boot: Setting bootsel to 2'b?", $realtime);
+                  $fatal(1, "[TB] %t - HyperFlash boot: Not supported yet", $realtime);
+               end else if (STIM_FROM == "SPI_FLASH") begin
+                  $display("[TB] %t - QSPI boot: Setting bootsel to 1'b0", $realtime);
+                  s_bootsel = 2'b00;
+               end
+
+               $display("[TB] %t - Releasing hard reset", $realtime);
+               s_rst_n = 1'b1;
+               debug_mode_if.init_dmi_access(s_tck, s_tms, s_trstn, s_tdi);
+               debug_mode_if.set_dmactive(1'b1, s_tck, s_tms, s_trstn, s_tdi, s_tdo);
+               #10us;
+
+            end else if (LOAD_L2 == "JTAG") begin
+               s_bootsel = 2'b01;
+            end else if (LOAD_L2 == "FAST_DEBUG_PRELOAD") begin
+               s_bootsel = 2'b01;
+            end else begin
+               $error("Unknown L2 loadmode: %s", LOAD_L2);
             end
 
-            if (LOAD_L2 == "JTAG") begin
+            if (LOAD_L2 == "JTAG" || LOAD_L2 == "FAST_DEBUG_PRELOAD") begin
                if (USE_FLL)
                   $display("[TB] %t - Using FLL", $realtime);
                else
@@ -683,19 +712,18 @@ module tb_pulp;
 
                $display("[TB] %t - Enabling clock out via jtag", $realtime);
 
-               // we are using a bootsel based booting method:
-               // bootsel = 1'b1 means booting from jtag => bootrom makes us wait in a wfi/busy loop
-               // bootsel = 1'b1 means booting from flash => start loading image from flash
-               // This logic is handled in the bootrom which will read the bootsel signal value.
-               //
-               // This also means we are currently not relying on the jtag confreg to configure the booting behavior but it is still possible to use it.
-               // When the confreg is not set then we will boot according to bootsel.
-               // TODO: regression: we can't propgate our FLL settings like this. Needs sw changes (?)
-               //
-               // jtag_conf_reg = {USE_FLL ? 1'b0 : 1'b1, 6'b0, LOAD_L2 == "JTAG" ? 2'b10 : 2'b00};
-               // test_mode_if.set_confreg(jtag_conf_reg, jtag_conf_rego,
-               //     s_tck, s_tms, s_trstn, s_tdi, s_tdo);
-               // $display("[TB] %t - jtag_conf_reg set to %x", $realtime, jtag_conf_reg);
+               // The boot code installed in the ROM checks the JTAG register value.
+               // If jtag_conf_reg is set to 0, the debug module will take over the boot process
+               // The image file can be loaded also from SPI flash and Hyper flash
+               // even though this is not the stand-alone boot
+
+               jtag_conf_reg = (STIM_FROM == "JTAG")           ? {1'b0, 4'b0, 3'b001, 1'b0}:
+                               (STIM_FROM == "SPI_FLASH")      ? {1'b0, 4'b0, 3'b111, 1'b0}:
+                               (STIM_FROM == "HYPER_FLASH")    ? {1'b0, 4'b0, 3'b101, 1'b0}: '0;
+               test_mode_if.set_confreg(jtag_conf_reg, jtag_conf_rego,
+                   s_tck, s_tms, s_trstn, s_tdi, s_tdo);
+
+               $display("[TB] %t - jtag_conf_reg set to %x", $realtime, jtag_conf_reg);
 
                $display("[TB] %t - Releasing hard reset", $realtime);
                s_rst_n = 1'b1;
@@ -756,14 +784,20 @@ module tb_pulp;
                   $stop;
                end
 
-               $display("[TB] %t - Loading L2", $realtime);
-               if (USE_PULP_BUS_ACCESS) begin
-                  // use pulp tap to load binary, put debug module in bypass
-                  pulp_tap_pkg::load_L2(num_stim, stimuli, s_tck, s_tms, s_trstn, s_tdi, s_tdo);
-
+               if (LOAD_L2 == "JTAG") begin
+                  $display("[TB] %t - Loading L2 via JTAG", $realtime);
+                  if (USE_PULP_BUS_ACCESS) begin
+                     // use pulp tap to load binary, put debug module in bypass
+                     pulp_tap_pkg::load_L2(num_stim, stimuli, s_tck, s_tms, s_trstn, s_tdi, s_tdo);
+                  end else begin
+                     // use debug module to load binary
+                     debug_mode_if.load_L2(num_stim, stimuli, s_tck, s_tms, s_trstn, s_tdi, s_tdo);
+                  end
+               end else if (LOAD_L2 == "FAST_DEBUG_PRELOAD") begin
+                  $warning("[TB] - Preloading the memory via direct simulator access. \nNEVER EVER USE THIS MODE TO VERIFY THE BOOT BEHAVIOR OF A CHIP. THIS BOOTMODE IS IMPOSSIBLE ON A PHYSICAL CHIP!!!");
+                  preload_l2(num_stim, stimuli);
                end else begin
-                  // use debug module to load binary
-                  debug_mode_if.load_L2(num_stim, stimuli, s_tck, s_tms, s_trstn, s_tdi, s_tdo);
+                  $error("Unknown L2 loading mechnism chosen (LOAD_L2 == %s)", LOAD_L2);
                end
 
                // configure for debug module dmi access again
@@ -800,8 +834,17 @@ module tb_pulp;
 
             jtag_data[0] = 0;
             while(jtag_data[0][31] == 0) begin
+               // every 10th loop iteration, clear the debug module's SBA unit CSR to make
+               // sure there's no error blocking our reads. Sometimes a TCDM read
+               // request issued by the debug module takes longer than it takes
+               // for the read request to the debug module to arrive and it
+               // stores an error in the SBCS register. By clearing it
+               // periodically we make sure the test can terminate.
+               if (rd_cnt % 10 == 0) begin
+                  debug_mode_if.clear_sbcserrors(s_tck, s_tms, s_trstn, s_tdi, s_tdo);
+               end
                debug_mode_if.readMem(32'h1A1040A0, jtag_data[0], s_tck, s_tms, s_trstn, s_tdi, s_tdo);
-
+               rd_cnt++;
                #50us;
             end
 
@@ -885,6 +928,46 @@ module tb_pulp;
             is_Read[index]  = 0;
          end
       end
+
+
+  task automatic preload_l2(
+                  input int        num_stim,
+                  ref logic [95:0] stimuli [100000:0]
+                  );
+    logic                          more_stim;
+    static logic [95:0]            stim_entry;
+     more_stim = 1'b1;
+     $info("Preloading L2 with stimuli through direct access.");
+     while (more_stim == 1'b1) begin
+        @(posedge i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.clk_i);
+        stim_entry = stimuli[num_stim];
+        force i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.req = 1'b1;
+        force i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.add = stim_entry[95:64];
+        force i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.wdata = stim_entry[31:0];
+        force i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.wen = 1'b0;
+        force i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.be  = '1;
+        do begin
+           @(posedge i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.clk_i);
+        end while (~i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.gnt);
+        force i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.add   = stim_entry[95:64]+4;
+        force i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.wdata = stim_entry[63:32];
+        do begin
+           @(posedge i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.clk_i);
+        end while (~i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.gnt);
+
+        num_stim = num_stim + 1;
+        if (num_stim > $size(stimuli) || stimuli[num_stim]===96'bx ) begin // make sure we have more stimuli
+           more_stim = 0;                    // if not set variable to 0, will prevent additional stimuli to be applied
+           break;
+        end
+     end // while (more_stim == 1'b1)
+     release i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.req;
+     release i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.add;
+     release i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.wdata;
+     release i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.wen;
+     release i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.tcdm_debug.be;
+     @(posedge i_dut.soc_domain_i.pulp_soc_i.i_soc_interconnect_wrap.clk_i);
+endtask
 
 
 endmodule // tb_pulp

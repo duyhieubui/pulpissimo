@@ -44,14 +44,22 @@ $(foreach file, $(INSTALL_FILES), $(eval $(call declareInstallFile,$(file))))
 BRANCH ?= master
 
 VLOG_ARGS += -suppress 2583 -suppress 13314
-BENDER_BUILD_DIR = sim
+BENDER_SIM_BUILD_DIR = sim
+BENDER_FPGA_SCRIPTS_DIR = fpga/pulpissimo/tcl/generated
 
 .PHONY: checkout
+## Checkout/update dependencies using IPApprox or Bender
 ifdef BENDER
 checkout: bender
 	./bender update
+	touch Bender.lock
+
+Bender.lock: bender
+	./bender update
+	touch Bender.lock
+
 else
-checkout:
+checkout: ipstools
 	./update-ips
 endif
 	$(MAKE) scripts
@@ -65,14 +73,27 @@ clean:
 	$(MAKE) -C sim BENDER=$(BENDER) clean
 
 .PHONY: scripts
-## Generate the scripts
 ifdef BENDER
-scripts: bender
-	echo 'set ROOT [file normalize [file dirname [info script]]/..]' > $(BENDER_BUILD_DIR)/compile.tcl
+## Generate scripts for all tools
+scripts: scripts-bender-vsim scripts-bender-fpga
+
+scripts-bender-fpga: | Bender.lock
+	mkdir -p fpga/pulpissimo/tcl/generated
+	./bender script vivado -t fpga -t xilinx > $(BENDER_FPGA_SCRIPTS_DIR)/compile.tcl
+
+scripts-bender-vsim: | Bender.lock
+	echo 'set ROOT [file normalize [file dirname [info script]]/..]' > $(BENDER_SIM_BUILD_DIR)/compile.tcl
 	./bender script vsim \
 		--vlog-arg="$(VLOG_ARGS)" --vcom-arg="" \
 		-t rtl -t test \
-		| grep -v "set ROOT" >> $(BENDER_BUILD_DIR)/compile.tcl
+		| grep -v "set ROOT" >> $(BENDER_SIM_BUILD_DIR)/compile.tcl
+
+$(BENDER_SIM_BUILD_DIR)/compile.tcl: Bender.lock
+	echo 'set ROOT [file normalize [file dirname [info script]]/..]' > $(BENDER_SIM_BUILD_DIR)/compile.tcl
+	./bender script vsim \
+		--vlog-arg="$(VLOG_ARGS)" --vcom-arg="" \
+		-t rtl -t test \
+		| grep -v "set ROOT" >> $(BENDER_SIM_BUILD_DIR)/compile.tcl
 
 else
 scripts:
@@ -82,9 +103,11 @@ endif
 .PHONY: build
 ## Build the RTL model for vsim
 ifdef BENDER
-build: bender
+build: $(BENDER_SIM_BUILD_DIR)/compile.tcl
 	@test -f Bender.lock || { echo "ERROR: Bender.lock file does not exist. Did you run make checkout in bender mode?"; exit 1; }
+	@test -f $(BENDER_SIM_BUILD_DIR)/compile.tcl || { echo "ERROR: sim/compile.tcl file does not exist. Did you run make scripts in bender mode?"; exit 1; }
 	cd sim && $(MAKE) BENDER=bender all
+
 else
 build:
 	@[ "$$(ls -A ips/)" ] || { echo "ERROR: ips/ is an empty directory. Did you run ./update-ips?"; exit 1; }
@@ -217,6 +240,17 @@ test-gitlab2:
 	source configs/pulpissimo.sh; \
 	source configs/rtl.sh; \
 	cd ../tests && plptest --threads 16 --stdout
+
+.PHONY: lint
+## Generate lint reports with Spyglass
+lint:
+	$(MAKE) -C spyglass lint_rtl
+
+# IPStools Integration
+ipstools:
+	git clone https://github.com/pulp-platform/IPApprox.git ipstools
+	cd ipstools && git checkout 6b0bbc917e6be883bdb5fcc1765da59563b46d2e
+	pip install --user semver==2.13.0 pyyaml
 
 # Bender integration
 bender:
